@@ -618,11 +618,11 @@ posix_sock_psk_find_session_server_cb(SSL *ssl, const unsigned char *identity,
 		cipher_name = SSL_CIPHER_get_name(cipher);
 
 		if (strcmp(user_cipher, cipher_name) == 0) {
-			rc = SSL_SESSION_set_cipher(*sess, cipher);
-			if (rc != 1) {
-				SPDK_ERRLOG("Unable to set cipher: %s\n", cipher_name);
-				goto err;
-			}
+			// rc = SSL_SESSION_set_cipher(*sess, cipher);
+			// if (rc != 1) {
+			// 	SPDK_ERRLOG("Unable to set cipher: %s\n", cipher_name);
+			// 	goto err;
+			// }
 			found = true;
 			break;
 		}
@@ -640,11 +640,11 @@ posix_sock_psk_find_session_server_cb(SSL *ssl, const unsigned char *identity,
 		goto err;
 	}
 
-	rc = SSL_SESSION_set1_master_key(*sess, key, keylen);
-	if (rc != 1) {
-		SPDK_ERRLOG("Unable to set PSK for session\n");
-		goto err;
-	}
+	// rc = SSL_SESSION_set1_master_key(*sess, key, keylen);
+	// if (rc != 1) {
+	// 	SPDK_ERRLOG("Unable to set PSK for session\n");
+	// 	goto err;
+	// }
 
 	return 1;
 
@@ -692,11 +692,11 @@ posix_sock_psk_use_session_client_cb(SSL *ssl, const EVP_MD *md, const unsigned 
 		cipher_name = SSL_CIPHER_get_name(cipher);
 
 		if (strcmp(impl_opts->tls_cipher_suites, cipher_name) == 0) {
-			rc = SSL_SESSION_set_cipher(*sess, cipher);
-			if (rc != 1) {
-				SPDK_ERRLOG("Unable to set cipher: %s\n", cipher_name);
-				goto err;
-			}
+			// rc = SSL_SESSION_set_cipher(*sess, cipher);
+			// if (rc != 1) {
+			// 	SPDK_ERRLOG("Unable to set cipher: %s\n", cipher_name);
+			// 	goto err;
+			// }
 			found = true;
 			break;
 		}
@@ -714,11 +714,11 @@ posix_sock_psk_use_session_client_cb(SSL *ssl, const EVP_MD *md, const unsigned 
 		goto err;
 	}
 
-	rc = SSL_SESSION_set1_master_key(*sess, impl_opts->psk_key, keylen);
-	if (rc != 1) {
-		SPDK_ERRLOG("Unable to set PSK for session\n");
-		goto err;
-	}
+	// rc = SSL_SESSION_set1_master_key(*sess, impl_opts->psk_key, keylen);
+	// if (rc != 1) {
+	// 	SPDK_ERRLOG("Unable to set PSK for session\n");
+	// 	goto err;
+	// }
 
 	*identity_len = strlen(impl_opts->psk_identity);
 	*identity = impl_opts->psk_identity;
@@ -793,8 +793,7 @@ posix_sock_create_ssl_context(const SSL_METHOD *method, struct spdk_sock_opts *o
 
 	/* SSL_CTX_set_ciphersuites() return 1 if the requested
 	 * cipher suite list was configured, and 0 otherwise. */
-	if (impl_opts->tls_cipher_suites != NULL &&
-	    SSL_CTX_set_ciphersuites(ctx, impl_opts->tls_cipher_suites) != 1) {
+	if (impl_opts->tls_cipher_suites != NULL) {
 		SPDK_ERRLOG("Unable to set TLS cipher suites for SSL'\n");
 		goto err;
 	}
@@ -807,9 +806,11 @@ err:
 }
 
 static SSL *
-ssl_sock_setup_connect(SSL_CTX *ctx, int fd)
+ssl_sock_connect_loop(SSL_CTX *ctx, int fd, struct spdk_sock_impl_opts *impl_opts)
 {
+	int rc;
 	SSL *ssl;
+	int ssl_get_error;
 
 	ssl = SSL_new(ctx);
 	if (!ssl) {
@@ -817,10 +818,26 @@ ssl_sock_setup_connect(SSL_CTX *ctx, int fd)
 		return NULL;
 	}
 	SSL_set_fd(ssl, fd);
-	SSL_set_connect_state(ssl);
-	SSL_set_psk_use_session_callback(ssl, posix_sock_psk_use_session_client_cb);
+	SSL_set_app_data(ssl, impl_opts);
+	// SSL_set_psk_use_session_callback(ssl, posix_sock_psk_use_session_client_cb);
 	SPDK_DEBUGLOG(sock_posix, "SSL object creation finished: %p\n", ssl);
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
+	while ((rc = SSL_connect(ssl)) != 1) {
+		SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
+		ssl_get_error = SSL_get_error(ssl, rc);
+		SPDK_DEBUGLOG(sock_posix, "SSL_connect failed %d = SSL_connect(%p), %d = SSL_get_error(%p, %d)\n",
+			      rc, ssl, ssl_get_error, ssl, rc);
+		switch (ssl_get_error) {
+		case SSL_ERROR_WANT_READ:
+		case SSL_ERROR_WANT_WRITE:
+			continue;
+		default:
+			break;
+		}
+		SPDK_ERRLOG("SSL_connect() failed, errno = %d\n", errno);
+		SSL_free(ssl);
+		return NULL;
+	}
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
 	SPDK_DEBUGLOG(sock_posix, "Negotiated Cipher suite:%s\n",
 		      SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
@@ -828,9 +845,11 @@ ssl_sock_setup_connect(SSL_CTX *ctx, int fd)
 }
 
 static SSL *
-ssl_sock_setup_accept(SSL_CTX *ctx, int fd)
+ssl_sock_accept_loop(SSL_CTX *ctx, int fd, struct spdk_sock_impl_opts *impl_opts)
 {
+	int rc;
 	SSL *ssl;
+	int ssl_get_error;
 
 	ssl = SSL_new(ctx);
 	if (!ssl) {
@@ -838,10 +857,26 @@ ssl_sock_setup_accept(SSL_CTX *ctx, int fd)
 		return NULL;
 	}
 	SSL_set_fd(ssl, fd);
-	SSL_set_accept_state(ssl);
-	SSL_set_psk_find_session_callback(ssl, posix_sock_psk_find_session_server_cb);
+	SSL_set_app_data(ssl, impl_opts);
+	// SSL_set_psk_find_session_callback(ssl, posix_sock_psk_find_session_server_cb);
 	SPDK_DEBUGLOG(sock_posix, "SSL object creation finished: %p\n", ssl);
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
+	while ((rc = SSL_accept(ssl)) != 1) {
+		SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
+		ssl_get_error = SSL_get_error(ssl, rc);
+		SPDK_DEBUGLOG(sock_posix, "SSL_accept failed %d = SSL_accept(%p), %d = SSL_get_error(%p, %d)\n", rc,
+			      ssl, ssl_get_error, ssl, rc);
+		switch (ssl_get_error) {
+		case SSL_ERROR_WANT_READ:
+		case SSL_ERROR_WANT_WRITE:
+			continue;
+		default:
+			break;
+		}
+		SPDK_ERRLOG("SSL_accept() failed, errno = %d\n", errno);
+		SSL_free(ssl);
+		return NULL;
+	}
 	SPDK_DEBUGLOG(sock_posix, "%s = SSL_state_string_long(%p)\n", SSL_state_string_long(ssl), ssl);
 	SPDK_DEBUGLOG(sock_posix, "Negotiated Cipher suite:%s\n",
 		      SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
@@ -1044,9 +1079,9 @@ retry:
 					fd = -1;
 					break;
 				}
-				ssl = ssl_sock_setup_connect(ctx, fd);
+				ssl = ssl_sock_connect_loop(ctx, fd, &impl_opts);
 				if (!ssl) {
-					SPDK_ERRLOG("ssl_sock_setup_connect() failed, errno = %d\n", errno);
+					SPDK_ERRLOG("ssl_sock_connect_loop() failed, errno = %d\n", errno);
 					close(fd);
 					fd = -1;
 					SSL_CTX_free(ctx);
@@ -1090,7 +1125,6 @@ retry:
 
 	if (ssl) {
 		sock->ssl = ssl;
-		SSL_set_app_data(ssl, &sock->base.impl_opts);
 	}
 
 	return &sock->base;
@@ -1159,9 +1193,9 @@ _posix_sock_accept(struct spdk_sock *_sock, bool enable_ssl)
 			close(fd);
 			return NULL;
 		}
-		ssl = ssl_sock_setup_accept(ctx, fd);
+		ssl = ssl_sock_accept_loop(ctx, fd, &sock->base.impl_opts);
 		if (!ssl) {
-			SPDK_ERRLOG("ssl_sock_setup_accept() failed, errno = %d\n", errno);
+			SPDK_ERRLOG("ssl_sock_accept_loop() failed, errno = %d\n", errno);
 			close(fd);
 			SSL_CTX_free(ctx);
 			return NULL;
@@ -1183,7 +1217,6 @@ _posix_sock_accept(struct spdk_sock *_sock, bool enable_ssl)
 
 	if (ssl) {
 		new_sock->ssl = ssl;
-		SSL_set_app_data(ssl, &new_sock->base.impl_opts);
 	}
 
 	return &new_sock->base;
